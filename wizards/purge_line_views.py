@@ -1,7 +1,10 @@
 # Copyright 2026 Bacem Jarraya
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 # pylint: disable=consider-merging-classes-inherited
+from psycopg2 import IntegrityError
+
 from odoo import fields, models
+from odoo.exceptions import UserError, ValidationError
 
 
 class CleanupPurgeLineView(models.TransientModel):
@@ -33,7 +36,18 @@ class CleanupPurgeLineView(models.TransientModel):
                 level += 1
             return level
 
-        views = to_unlink.mapped("view_id").with_context(active_test=False)
-        for view in sorted(views, key=depth, reverse=True):
-            view.exists().unlink()
-        return to_unlink.write({"purged": True})
+        done = self.browse()
+        for line in sorted(
+            to_unlink, key=lambda x: depth(x.view_id.with_context(active_test=False)),
+            reverse=True,
+        ):
+            view = line.view_id.with_context(active_test=False)
+            try:
+                with self.env.cr.savepoint():
+                    view.exists().unlink()
+            except (IntegrityError, ValidationError, UserError) as exc:
+                self.logger.warning("Cannot purge view %s: %s", line.name, exc)
+                line.reason = self.env._("NOT PURGED: %s", str(exc).strip()[:200])
+                continue
+            done |= line
+        return done.write({"purged": True})

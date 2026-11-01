@@ -4,6 +4,7 @@
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.fields import Command
+from odoo.tools import SQL
 
 LIVE_STATES = ("installed", "to upgrade", "to remove", "to install")
 
@@ -98,6 +99,40 @@ class CleanupPurgeWizardView(models.TransientModel):
             while parent_id:
                 dead.pop(parent_id, None)
                 parent_id = parent_of.get(parent_id)
+
+        # views still referenced through a restrictive foreign key (for
+        # example payment.provider.express_checkout_form_view_id) cannot be
+        # deleted either: keep them, and keep their parents as well
+        cr.execute(
+            """
+            SELECT c.conrelid::regclass::text, a.attname
+              FROM pg_constraint c
+              JOIN pg_attribute a
+                ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+             WHERE c.contype = 'f'
+               AND c.confrelid = 'ir_ui_view'::regclass
+               AND c.confdeltype IN ('a', 'r')
+               AND c.conrelid <> 'ir_ui_view'::regclass
+            """
+        )
+        referenced = set()
+        for table, column in cr.fetchall():
+            if not dead:
+                break
+            cr.execute(
+                SQL(
+                    "SELECT DISTINCT %s FROM %s WHERE %s = ANY(%s)",
+                    SQL.identifier(column),
+                    SQL(table),
+                    SQL.identifier(column),
+                    list(dead),
+                )
+            )
+            referenced.update(row[0] for row in cr.fetchall())
+        for view_id in referenced:
+            while view_id:
+                dead.pop(view_id, None)
+                view_id = parent_of.get(view_id)
         return dead
 
     @api.model
